@@ -337,6 +337,56 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
         value = fields.get(key)
         return value is not None and value != "" and value != [] and value != {}
 
+    def shape(value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, dict):
+            return "dict"
+        if isinstance(value, list):
+            return "list"
+        if isinstance(value, tuple):
+            return "tuple"
+        return type(value).__name__
+
+    def fingerprint(value: Any, *, remove_markup: bool = True) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value
+        if remove_markup:
+            normalized = re.sub(r"<img\b[^>]*>", " [image] ", normalized, flags=re.I)
+            normalized = re.sub(r"<[^>]*>", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip().casefold()
+        if not normalized:
+            return None
+        return hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
+
+    def image_src_categories(value: Any) -> collections.Counter:
+        result: collections.Counter = collections.Counter()
+        if not isinstance(value, str):
+            return result
+        for tag in re.findall(r"<img\b[^>]*>", value, flags=re.I):
+            src = re.search(r"""\bsrc\s*=\s*["']?([^"'\s>]+)""", tag, flags=re.I)
+            if not src:
+                result["no_src_attribute"] += 1
+                continue
+            address = src.group(1).strip()
+            lower = address.lower()
+            if lower.startswith("https://"):
+                result["https"] += 1
+            elif lower.startswith("http://"):
+                result["http"] += 1
+            elif lower.startswith("data:"):
+                result["data_uri"] += 1
+            elif lower.startswith("//"):
+                result["protocol_relative"] += 1
+            elif lower.startswith("blob:"):
+                result["blob_uri"] += 1
+            elif lower.startswith("/") or not re.match(r"^[a-z][a-z0-9+.-]*:", lower):
+                result["relative_path"] += 1
+            else:
+                result["other_scheme"] += 1
+        return result
+
     subjects = collections.Counter(str(fields.get("subject", "MISSING")) for _, fields in candidates)
     years = collections.Counter(str(fields.get("year", "MISSING")) for _, fields in candidates)
     question_types = collections.Counter(str(fields.get("type", "MISSING")) for _, fields in candidates)
@@ -363,6 +413,116 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
     option_images = sum(strings_contain_img(fields.get("options")) for _, fields in candidates)
     explanation_images = sum(strings_contain_img(fields.get("explanation")) for _, fields in candidates)
 
+    option_shapes = collections.Counter()
+    option_count_dist = collections.Counter()
+    option_item_key_presence = collections.Counter()
+    correct_shapes = collections.Counter()
+    correct_item_type_counts = collections.Counter()
+    correct_choice_count_dist = collections.Counter()
+    answer_value_types = collections.Counter()
+    option_identifier_matches = collections.Counter()
+    question_fingerprints = collections.Counter()
+    explanation_fingerprints = collections.Counter()
+    question_length_bins = collections.Counter()
+    explanation_length_bins = collections.Counter()
+    image_src_totals = collections.Counter()
+    blank_question_count = 0
+    blank_explanation_count = 0
+    optionless_by_type = collections.Counter()
+    no_correct_options_by_type = collections.Counter()
+    option_id_keys = ("id", "_id", "option_id", "optionId", "key", "label", "index", "order", "order_id")
+
+    for _, fields in candidates:
+        qtext = fields.get("question")
+        explanation = fields.get("explanation")
+        qnorm = fingerprint(qtext)
+        enorm = fingerprint(explanation)
+        if qnorm:
+            question_fingerprints[qnorm] += 1
+        if enorm:
+            explanation_fingerprints[enorm] += 1
+
+        qlen = len(qtext.strip()) if isinstance(qtext, str) else 0
+        elen = len(explanation.strip()) if isinstance(explanation, str) else 0
+        if qlen == 0:
+            blank_question_count += 1
+        if elen == 0:
+            blank_explanation_count += 1
+        for length, bins in ((qlen, question_length_bins), (elen, explanation_length_bins)):
+            if length == 0:
+                bins["0"] += 1
+            elif length < 40:
+                bins["1-39"] += 1
+            elif length < 100:
+                bins["40-99"] += 1
+            elif length < 300:
+                bins["100-299"] += 1
+            elif length < 1000:
+                bins["300-999"] += 1
+            else:
+                bins["1000+"] += 1
+
+        options = fields.get("options")
+        correct = fields.get("correct_options")
+        answer = fields.get("answer")
+        option_shapes[shape(options)] += 1
+        correct_shapes[shape(correct)] += 1
+        answer_value_types[shape(answer)] += 1
+        if isinstance(options, (list, tuple, dict)):
+            option_count_dist[str(len(options))] += 1
+        if isinstance(correct, (list, tuple)):
+            correct_choice_count_dist[str(len(correct))] += 1
+            for item in correct:
+                correct_item_type_counts[shape(item)] += 1
+        elif correct is not None:
+            correct_item_type_counts[shape(correct)] += 1
+
+        qtype = str(fields.get("type", "MISSING"))
+        if not options:
+            optionless_by_type[qtype] += 1
+        if not correct:
+            no_correct_options_by_type[qtype] += 1
+
+        option_ids: set[str] = set()
+        option_items = options if isinstance(options, (list, tuple)) else []
+        for item in option_items:
+            if not isinstance(item, dict):
+                continue
+            for key in item.keys():
+                if isinstance(key, str):
+                    option_item_key_presence[key] += 1
+            for key in option_id_keys:
+                if key in item and item[key] is not None:
+                    option_ids.add(str(item[key]))
+        if option_ids and isinstance(correct, (list, tuple)):
+            for choice in correct:
+                if isinstance(choice, (str, int, float)):
+                    option_identifier_matches["tested"] += 1
+                    if str(choice) in option_ids:
+                        option_identifier_matches["matched"] += 1
+                    else:
+                        option_identifier_matches["unmatched"] += 1
+                else:
+                    option_identifier_matches["non_scalar_correct_value"] += 1
+        else:
+            option_identifier_matches["records_without_testable_id_mapping"] += 1
+
+        image_src_totals.update(image_src_categories(qtext))
+        image_src_totals.update(image_src_categories(explanation))
+        if isinstance(options, (list, tuple)):
+            for item in options:
+                if isinstance(item, dict):
+                    image_src_totals.update(image_src_categories(item.get("content")))
+
+    def duplicate_summary(counter: collections.Counter) -> dict[str, int]:
+        return {
+            "records_with_fingerprint": sum(counter.values()),
+            "unique_normalized_fingerprints": len(counter),
+            "fingerprints_repeated": sum(1 for n in counter.values() if n > 1),
+            "records_in_repeated_groups": sum(n for n in counter.values() if n > 1),
+            "largest_exact_normalized_group": max(counter.values(), default=0),
+        }
+
     root_kind = type(root).__name__
     root_length = len(root) if isinstance(root, (dict, list, tuple, set)) else None
     return {
@@ -381,10 +541,29 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
         "year_counts": dict(sorted(years.items())),
         "question_type_counts": dict(sorted(question_types.items())),
         "field_coverage": field_coverage,
+        "answer_value_types": dict(sorted(answer_value_types.items())),
+        "option_shapes": dict(sorted(option_shapes.items())),
+        "option_count_distribution": dict(sorted(option_count_dist.items(), key=lambda item: int(item[0]))),
+        "correct_options_shapes": dict(sorted(correct_shapes.items())),
+        "correct_option_item_types": dict(sorted(correct_item_type_counts.items())),
+        "correct_choice_count_distribution": dict(sorted(correct_choice_count_dist.items(), key=lambda item: int(item[0]))),
+        "option_item_key_presence": dict(sorted(option_item_key_presence.items())),
+        "candidate_option_id_matching": dict(sorted(option_identifier_matches.items())),
+        "optionless_question_type_counts": dict(sorted(optionless_by_type.items())),
+        "records_without_correct_options_by_type": dict(sorted(no_correct_options_by_type.items())),
+        "text_quality": {
+            "blank_question_content": blank_question_count,
+            "blank_explanation": blank_explanation_count,
+            "question_length_bins": dict(sorted(question_length_bins.items())),
+            "explanation_length_bins": dict(sorted(explanation_length_bins.items())),
+            "question_content_duplicates": duplicate_summary(question_fingerprints),
+            "explanation_duplicates": duplicate_summary(explanation_fingerprints),
+        },
         "records_with_html_images": {
             "question_content": question_images,
             "options": option_images,
             "explanation": explanation_images,
+            "image_source_categories_total": dict(sorted(image_src_totals.items())),
         },
         "sample_metadata_only": [
             {
@@ -399,11 +578,12 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
         ],
         "warnings": [
             "Candidate count is based on inert object fields and must be reviewed against cache semantics.",
-            "No question text, options, answers, explanations, or image URLs are written to the report.",
+            "Text content and image URLs are not written to the report; only counts and hashes are emitted.",
+            "Exact repeated text can be legitimate; duplicate metrics are for QA triage, not automatic deletion.",
+            "Option-ID matches are tested only where options expose a recognized ID/key and correct choices are scalar values.",
             "Data licensing/redistribution rights remain unverified.",
         ],
     }
-
 
 def main() -> None:
     parser = argparse.ArgumentParser()
