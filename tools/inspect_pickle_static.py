@@ -421,6 +421,9 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
     correct_choice_count_dist = collections.Counter()
     answer_value_types = collections.Counter()
     option_identifier_matches = collections.Counter()
+    correct_option_position_counts = collections.Counter()
+    correct_option_record_resolution = collections.Counter()
+    records_with_duplicate_option_identifiers = 0
     question_fingerprints = collections.Counter()
     explanation_fingerprints = collections.Counter()
     explanation_group_meta: dict[str, dict[str, Any]] = {}
@@ -519,8 +522,10 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
 
         option_ids: set[str] = set()
         option_items = options if isinstance(options, (list, tuple)) else []
+        ordered_identifiers: list[str | None] = []
         for item in option_items:
             if not isinstance(item, dict):
+                ordered_identifiers.append(None)
                 continue
             for key in item.keys():
                 if isinstance(key, str):
@@ -528,18 +533,51 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
             for key in option_id_keys:
                 if key in item and item[key] is not None:
                     option_ids.add(str(item[key]))
+            identifier = item.get("identifier")
+            ordered_identifiers.append(str(identifier) if identifier is not None else None)
+        available_ids = [value for value in ordered_identifiers if value is not None]
+        if len(available_ids) != len(set(available_ids)):
+            records_with_duplicate_option_identifiers += 1
+
         if option_ids and isinstance(correct, (list, tuple)):
+            mapped_positions: list[int] = []
+            unresolved = False
             for choice in correct:
                 if isinstance(choice, (str, int, float)):
-                    option_identifier_matches["tested"] += 1
-                    if str(choice) in option_ids:
+                    choice_text = str(choice)
+                    if choice_text in option_ids:
                         option_identifier_matches["matched"] += 1
                     else:
                         option_identifier_matches["unmatched"] += 1
+                    option_identifier_matches["tested"] += 1
+                    positions = [
+                        index + 1
+                        for index, identifier in enumerate(ordered_identifiers)
+                        if identifier is not None and identifier == choice_text
+                    ]
+                    if len(positions) == 1:
+                        mapped_positions.extend(positions)
+                    else:
+                        unresolved = True
+                        option_identifier_matches["unresolved_ordered_position"] += 1
                 else:
+                    unresolved = True
                     option_identifier_matches["non_scalar_correct_value"] += 1
+            if correct:
+                if unresolved:
+                    correct_option_record_resolution["unresolved"] += 1
+                else:
+                    correct_option_record_resolution["resolved"] += 1
+                    for position in mapped_positions:
+                        correct_option_position_counts[str(position)] += 1
+            else:
+                correct_option_record_resolution["empty_correct_options"] += 1
         else:
             option_identifier_matches["records_without_testable_id_mapping"] += 1
+            if isinstance(correct, (list, tuple)) and not correct:
+                correct_option_record_resolution["empty_correct_options"] += 1
+            elif correct:
+                correct_option_record_resolution["unresolved"] += 1
 
         image_src_totals.update(image_src_categories(qtext))
         image_src_totals.update(image_src_categories(explanation))
@@ -597,6 +635,9 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
         "correct_choice_count_distribution": dict(sorted(correct_choice_count_dist.items(), key=lambda item: int(item[0]))),
         "option_item_key_presence": dict(sorted(option_item_key_presence.items())),
         "candidate_option_id_matching": dict(sorted(option_identifier_matches.items())),
+        "correct_option_record_resolution": dict(sorted(correct_option_record_resolution.items())),
+        "correct_option_position_counts": dict(sorted(correct_option_position_counts.items(), key=lambda item: int(item[0]))),
+        "records_with_duplicate_option_identifiers": records_with_duplicate_option_identifiers,
         "optionless_question_type_counts": dict(sorted(optionless_by_type.items())),
         "records_without_correct_options_by_type": dict(sorted(no_correct_options_by_type.items())),
         "text_quality": {
