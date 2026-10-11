@@ -1,0 +1,72 @@
+name: Safe static inspection of JEE database cache
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/safe-cache-inspection.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download pinned database cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --max-time 180 \
+            "https://github.com/HostServer001/jee_mains_pyqs_data_base/releases/download/v007/1762787474-DataBaseChapters-v007.pkl" \
+            --output database.pkl
+          echo "Downloaded bytes: $(wc -c < database.pkl)"
+          echo "Expected SHA-256: 7f6ac2edccbaf9d7c23bfc8c214e0cc658ebbb8f25a78280e250bf7ceb5b4a9a"
+          echo "Actual SHA-256:"
+          sha256sum database.pkl
+          echo "7f6ac2edccbaf9d7c23bfc8c214e0cc658ebbb8f25a78280e250bf7ceb5b4a9a  database.pkl" | sha256sum --check -
+      - name: Inspect pickle opcodes without unpickling
+        shell: bash
+        run: |
+          python - <<'PY'
+          import collections, pickletools, re
+          from pathlib import Path
+
+          path = Path("database.pkl")
+          opcode_counts = collections.Counter()
+          text_counts = collections.Counter()
+          text_ops = {"UNICODE", "BINUNICODE", "SHORT_BINUNICODE", "BINUNICODE8",
+                      "STRING", "BINSTRING", "SHORT_BINSTRING"}
+          for op, arg, pos in pickletools.genops(path.read_bytes()):
+              opcode_counts[op.name] += 1
+              if op.name in text_ops and isinstance(arg, str):
+                  text_counts[arg] += 1
+
+          print("STATIC_SCAN=PASS (pickletools only; pickle.load/eval/import not used)")
+          print("Opcode totals:")
+          for name in ("PROTO", "FRAME", "GLOBAL", "STACK_GLOBAL", "REDUCE", "NEWOBJ",
+                       "NEWOBJ_EX", "BUILD", "EMPTY_DICT", "DICT", "SETITEM", "SETITEMS",
+                       "EMPTY_LIST", "APPENDS", "STOP"):
+              if opcode_counts[name]:
+                  print(f"  {name}: {opcode_counts[name]}")
+          print("Metadata-key string occurrences:")
+          for key in ("question_id", "examGroup", "exam", "subject", "chapterGroup",
+                      "chapter", "year", "paperTitle", "difficulty", "topic", "type",
+                      "examDate", "answer", "question", "content", "options",
+                      "correct_options", "explanation", "isOutOfSyllabus", "isBonus"):
+              print(f"  {key}: {text_counts[key]}")
+          print("Subject-label occurrences:")
+          for label in ("Physics", "Chemistry", "Mathematics", "Maths"):
+              print(f"  {label}: {text_counts[label]}")
+          years = sorted((s, n) for s, n in text_counts.items()
+                         if re.fullmatch(r"(?:19|20)\d{2}", s))
+          print("Year-like string values (count only):")
+          print("  " + ", ".join(f"{year}:{count}" for year, count in years) if years else "  none found")
+          print(f"Distinct string literals: {len(text_counts)}")
+          print("NOTE: static opcode counts are not a verified question-record count.")
+          PY
+      - name: Remove downloaded cache
+        if: always()
+        run: rm -f database.pkl
