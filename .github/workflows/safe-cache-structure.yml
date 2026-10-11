@@ -1,0 +1,49 @@
+name: Safe static decode of JEE cache structure
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "tools/inspect_pickle_static.py"
+      - ".github/workflows/safe-cache-structure.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout inspection-only code
+        uses: actions/checkout@v4
+
+      - name: Download exact pinned v007 cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --max-time 180 \
+            "https://github.com/HostServer001/jee_mains_pyqs_data_base/releases/download/v007/1762787474-DataBaseChapters-v007.pkl" \
+            --output database.pkl
+          test "$(wc -c < database.pkl)" -eq 24161992
+          echo "7f6ac2edccbaf9d7c23bfc8c214e0cc658ebbb8f25a78280e250bf7ceb5b4a9a  database.pkl" | sha256sum --check -
+
+      - name: Decode inert structure and report metadata only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/inspect_pickle_static.py --input database.pkl --output static-cache-report.json
+
+      - name: Upload metadata-only report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safe-static-cache-report
+          path: static-cache-report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove downloaded cache
+        if: always()
+        run: rm -f database.pkl
