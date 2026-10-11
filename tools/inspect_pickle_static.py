@@ -423,6 +423,9 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
     option_identifier_matches = collections.Counter()
     question_fingerprints = collections.Counter()
     explanation_fingerprints = collections.Counter()
+    explanation_group_meta: dict[str, dict[str, Any]] = {}
+    explanation_placeholder_flags = collections.Counter()
+    explanation_image_only = 0
     question_length_bins = collections.Counter()
     explanation_length_bins = collections.Counter()
     image_src_totals = collections.Counter()
@@ -430,7 +433,7 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
     blank_explanation_count = 0
     optionless_by_type = collections.Counter()
     no_correct_options_by_type = collections.Counter()
-    option_id_keys = ("id", "_id", "option_id", "optionId", "key", "label", "index", "order", "order_id")
+    option_id_keys = ("id", "_id", "identifier", "option_id", "optionId", "key", "label", "index", "order", "order_id")
 
     for _, fields in candidates:
         qtext = fields.get("question")
@@ -441,9 +444,33 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
             question_fingerprints[qnorm] += 1
         if enorm:
             explanation_fingerprints[enorm] += 1
-
+            meta = explanation_group_meta.setdefault(enorm, {
+                "count": 0, "lengths": collections.Counter(),
+                "records_with_img_tag": 0, "visible_text_lengths": collections.Counter(),
+            })
+            meta["count"] += 1
         qlen = len(qtext.strip()) if isinstance(qtext, str) else 0
         elen = len(explanation.strip()) if isinstance(explanation, str) else 0
+        if enorm and isinstance(explanation, str):
+            meta["lengths"][str(elen)] += 1
+            meta["records_with_img_tag"] += int(bool(re.search(r"<img\\b", explanation, flags=re.I)))
+            visible = re.sub(r"<img\\b[^>]*>", " ", explanation, flags=re.I)
+            visible = re.sub(r"<[^>]*>", " ", visible)
+            visible = re.sub(r"\\s+", " ", visible).strip()
+            meta["visible_text_lengths"][str(len(visible))] += 1
+            if not visible:
+                explanation_image_only += 1
+            low = visible.casefold()
+            placeholder_patterns = {
+                "solution_not_available": r"\\b(solution|explanation)\\s+(is\\s+)?(not available|unavailable)\\b",
+                "coming_soon": r"\\b(coming soon|to be updated)\\b",
+                "login_gated_text": r"\\b(please )?(login|sign in)\\b",
+                "explicit_na": r"^\\s*(n/?a|none|null|undefined)\\s*[.! ]*\\s*$",
+                "generic_no_solution": r"\\bno (detailed )?(solution|explanation)\\b",
+            }
+            for label, pattern in placeholder_patterns.items():
+                if re.search(pattern, low, flags=re.I):
+                    explanation_placeholder_flags[label] += 1
         if qlen == 0:
             blank_question_count += 1
         if elen == 0:
@@ -514,13 +541,27 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
                 if isinstance(item, dict):
                     image_src_totals.update(image_src_categories(item.get("content")))
 
-    def duplicate_summary(counter: collections.Counter) -> dict[str, int]:
+    def duplicate_summary(counter: collections.Counter) -> dict[str, Any]:
+        repeated = sorted(
+            ((key, n) for key, n in counter.items() if n > 1),
+            key=lambda item: (-item[1], item[0]),
+        )
+        top_groups = []
+        for key, count in repeated[:5]:
+            meta = explanation_group_meta.get(key, {})
+            top_groups.append({
+                "records_in_group": count,
+                "representative_raw_length_distribution": dict(sorted(meta.get("lengths", {}).items(), key=lambda item: int(item[0]))),
+                "records_with_img_tag": meta.get("records_with_img_tag", 0),
+                "visible_text_length_distribution": dict(sorted(meta.get("visible_text_lengths", {}).items(), key=lambda item: int(item[0]))),
+            })
         return {
             "records_with_fingerprint": sum(counter.values()),
             "unique_normalized_fingerprints": len(counter),
             "fingerprints_repeated": sum(1 for n in counter.values() if n > 1),
             "records_in_repeated_groups": sum(n for n in counter.values() if n > 1),
             "largest_exact_normalized_group": max(counter.values(), default=0),
+            "largest_repeat_groups_metadata_only": top_groups,
         }
 
     root_kind = type(root).__name__
@@ -556,6 +597,8 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
             "blank_explanation": blank_explanation_count,
             "question_length_bins": dict(sorted(question_length_bins.items())),
             "explanation_length_bins": dict(sorted(explanation_length_bins.items())),
+            "explanation_visible_content_records_only_images_or_markup": explanation_image_only,
+            "explanation_placeholder_pattern_counts": dict(sorted(explanation_placeholder_flags.items())),
             "question_content_duplicates": duplicate_summary(question_fingerprints),
             "explanation_duplicates": duplicate_summary(explanation_fingerprints),
         },
