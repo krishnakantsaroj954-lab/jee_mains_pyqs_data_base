@@ -442,8 +442,6 @@ def build_report(data: bytes, root: Any) -> dict[str, Any]:
         enorm = fingerprint(explanation)
         if qnorm:
             question_fingerprints[qnorm] += 1
-        if qnorm:
-            question_fingerprints[qnorm] += 1
         if enorm:
             explanation_fingerprints[enorm] += 1
             meta = explanation_group_meta.setdefault(enorm, {
